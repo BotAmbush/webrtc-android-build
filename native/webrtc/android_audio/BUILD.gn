@@ -1,0 +1,53 @@
+import("//webrtc.gni")
+declare_args() {
+  # Private sender-comparison tests are opt-in and are not inputs to an Android
+  # dependency-only build/public source snapshot.
+  luma_audio_cpu_tests = false
+}
+
+rtc_library("stereo_opus_factory") {
+  sources = [ "stereo_opus_factory.cc", "stereo_opus_factory.h" ]
+  allow_poison = [ "audio_codecs" ]
+  deps = [
+    "//api:make_ref_counted",
+    "//api:scoped_refptr",
+    "//api/audio_codecs:audio_codecs_api",
+    "//api/audio_codecs:builtin_audio_decoder_factory",
+    "//api/audio_codecs/opus:audio_decoder_opus",
+    "//api/environment",
+  ]
+}
+if (is_android) {
+  rtc_shared_library("luma_webrtc_audio") {
+    sources = [ "jni_audio_factory.cc" ]
+    allow_poison = [ "audio_codecs" ]
+    # The Java adapter uses ordinary exported JNI names, not JNI_OnLoad-only
+    # registration. Match the official SDK shared library's export policy.
+    suppressed_configs = [ "//build/config/android:hide_all_but_jni_onload" ]
+    configs += [ "//build/config/android:hide_all_but_jni" ]
+    deps = [ ":stereo_opus_factory" ]
+  }
+  group("luma_audio_bundle") {
+    # Keep both targets visible to the official combined license generator.
+    # The build recipe compiles only the addon, leaving the prior AAR intact.
+    deps = [ ":luma_webrtc_audio", "//sdk/android:libjingle_peerconnection_so" ]
+  }
+}
+if (!is_android && luma_audio_cpu_tests) {
+ rtc_executable("luma_stereo_opus_tests") {
+  # The test recipe copies this header byte-for-byte from the actual Windows
+  # sender, not from a second imitation of its parameter/encoder behavior.
+  sources = [ "stereo_opus_tests.cc", "host_opus_factory.h" ]
+  deps = [
+    ":stereo_opus_factory",
+    "//api:make_ref_counted",
+    "//api/audio_codecs:audio_codecs_api",
+    "//api/audio_codecs:builtin_audio_decoder_factory",
+    "//api/audio_codecs/opus:audio_encoder_opus",
+    "//api/audio_codecs/opus:audio_decoder_opus",
+    "//api/environment:environment_factory",
+    "//rtc_base:buffer",
+    "//third_party/opus",
+  ]
+ }
+}

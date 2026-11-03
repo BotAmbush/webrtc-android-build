@@ -1,0 +1,98 @@
+name: Build pinned WebRTC Android AAR
+
+on:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: Receiver ABI (arm64 first; x86_64 is for emulator qualification)
+        required: true
+        default: arm64-v8a
+        type: choice
+        options: [arm64-v8a, x86_64]
+
+permissions:
+  # Public dependency release assets avoid metered Actions artifact storage.
+  contents: write
+
+concurrency:
+  group: webrtc-android-${{ github.ref }}-${{ inputs.abi }}
+  cancel-in-progress: false
+
+jobs:
+  aar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      DEPOT_TOOLS_UPDATE: '0'
+      DEPOT_TOOLS_METRICS: '0'
+      GCLIENT_PY3: '1'
+      LUMA_WEBRTC_ABI: ${{ inputs.abi }}
+    steps:
+      - name: Read reviewed build scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Reserve space on this disposable GitHub Linux worker only
+        shell: bash
+        run: |
+          [[ "$GITHUB_ACTIONS" == true && "$RUNNER_OS" == Linux && -n "$RUNNER_TEMP" ]]
+          # WebRTC fetches the exact SDK/NDK from its pinned DEPS. These are
+          # unused image tools, not anything on a user's computer.
+          df -h "$RUNNER_TEMP"
+          # The runner's action Node binaries live in its own externals directory;
+          # this unused language cache is not the pinned WebRTC toolchain.
+          for path in /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache /opt/az /usr/local/share/chromium; do
+            [[ ! -L "$path" ]] || { echo 'Unexpected tool-root symlink'; exit 1; }
+            sudo rm -rf -- "$path"
+          done
+          free_kib=$(df --output=avail -k "$RUNNER_TEMP" | tail -1 | tr -d ' ')
+          df -h "$RUNNER_TEMP"
+          [[ "$free_kib" =~ ^[0-9]+$ && "$free_kib" -ge 36700160 ]] || { echo "WebRTC needs at least 35 GiB free; available KiB: $free_kib"; exit 1; }
+      - name: Compile official source and collect license closure
+        timeout-minutes: 70
+        shell: bash
+        run: bash tools/build/Build-WebRtcAndroid.sh "$RUNNER_TEMP/luma-webrtc" "$GITHUB_WORKSPACE/artifacts/webrtc-android/base" "$LUMA_WEBRTC_ABI"
+      - name: Build stereo decoder factory with the unchanged pinned toolchain
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          python3 native/webrtc/android_audio/build_addon.py \
+            --source-root "$RUNNER_TEMP/luma-webrtc/src" \
+            --depot-tools "$RUNNER_TEMP/luma-webrtc/depot_tools" \
+            --build-dir "$RUNNER_TEMP/luma-webrtc/src/out/luma-aar/$LUMA_WEBRTC_ABI" \
+            --base-aar "$GITHUB_WORKSPACE/artifacts/webrtc-android/base/libwebrtc-19581c3352d3e77b3e9731318279772a05540bbe-$LUMA_WEBRTC_ABI.aar" \
+            --abi "$LUMA_WEBRTC_ABI" \
+            --output "$GITHUB_WORKSPACE/artifacts/webrtc-android/addon" --jobs 2
+      - name: Verify and compose the dependency with both native libraries
+        id: compose
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          python3 tests/Test-WebRtcAndroidComposition.py
+          python3 tools/build/Compose-WebRtcAndroid.py \
+            --base "$GITHUB_WORKSPACE/artifacts/webrtc-android/base" \
+            --addon "$GITHUB_WORKSPACE/artifacts/webrtc-android/addon" \
+            --output "$GITHUB_WORKSPACE/artifacts/webrtc-android/stereo" \
+            --abi "$LUMA_WEBRTC_ABI"
+      - name: Preserve dependency outputs as public release assets
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMPOSITION_OUTCOME: ${{ steps.compose.outcome }}
+        run: |
+          output="$GITHUB_WORKSPACE/artifacts/webrtc-android"
+          if [[ ! -d "$output" || -z "$(find "$output" -type f -print -quit)" ]]; then
+            echo 'No dependency files were produced.'
+            exit 0
+          fi
+          tag="webrtc-19581c3352d3-$LUMA_WEBRTC_ABI-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          archive="$RUNNER_TEMP/$tag.tar.gz"
+          notes="$RUNNER_TEMP/dependency-release-notes.txt"
+          tar -czf "$archive" -C "$output" .
+          printf 'Dependency-only build. Composition outcome: %s.\nPartial outputs without a complete verified receipt are unqualified. Compilation does not qualify hardware or media playback.\n' "$COMPOSITION_OUTCOME" > "$notes"
+          gh release create "$tag" "$archive" --target "$GITHUB_SHA" \
+            --title "WebRTC Android dependency $LUMA_WEBRTC_ABI ($GITHUB_RUN_ID)" \
+            --notes-file "$notes" --prerelease
