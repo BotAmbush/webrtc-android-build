@@ -16,7 +16,13 @@ release `webrtc-19581c3352d3-arm64-v8a-41696830014-1`, whose archive and origina
 receipt are independently pinned in the workflow. It prepares the same source
 and toolchain, builds only the addon in a fresh output directory, and verifies
 the complete base again before composition. It does not relabel the reused
-base as a newly compiled SDK. The standard `ubuntu-24.04` GitHub-hosted runner supplies the Linux
+base as a newly compiled SDK. Preparation omits only the exact pinned root hook
+that downloads test audio/video files under `src/resources`; the supported
+gclient override and its scope are checked and recorded. Source, dependency
+revisions, compiler and runtime-library inputs remain unchanged. The full SDK
+build recipe retains its original hooks.
+
+The standard `ubuntu-24.04` GitHub-hosted runner supplies the Linux
 build environment; users do not need Linux or WSL on their Windows computer.
 No large or paid runner is selected. The job has a 50-minute limit. Dependency
 outputs are published as public prerelease assets, with no Actions cache or

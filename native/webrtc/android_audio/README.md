@@ -59,6 +59,10 @@ Every child build tool receives the verified depot directory first in its own
 PATH, including gclient's nested CIPD invocation when preparation ran in a
 previous shell step. This does not alter the caller's or machine's environment.
 Captured tool failures retain their bounded stdout/stderr in the build log.
+GN argument validation uses an explicit `current` value when present and the
+declared `default` otherwise. Android/CPU/release/Opus/local-execution values
+remain mandatory; an unsafe or malformed explicit override cannot use a safe
+default instead. The effective `use_siso` boolean selects the existing runner.
 
 `test_gn_contract.py --source-root <existing-pinned-checkout> --output <fresh-fixture-dir>`
 exercises the exact pinned Android JNI template bodies using existing local GN.

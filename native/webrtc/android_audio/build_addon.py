@@ -73,20 +73,31 @@ def regular_file(path, maximum=268435456):
     return path
 
 
-def validate_args(records, abi):
-    if abi not in ABIS:
-        raise ValueError("Unsupported ABI")
+def effective_args(records):
     values = {}
     for entry in records:
         name = entry.get("name")
         if name in values:
             raise ValueError("Duplicate GN argument")
-        values[name] = entry.get("current", {}).get("value")
+        # GN emits `current` only for an explicit override. An unchanged
+        # declared argument has just `default`, even though it is effective.
+        selected = entry.get("current") if "current" in entry else entry.get("default")
+        values[name] = selected.get("value") if isinstance(selected, dict) else None
+    return values
+
+
+def validate_args(records, abi):
+    if abi not in ABIS:
+        raise ValueError("Unsupported ABI")
+    values = effective_args(records)
     expected = {"target_os": '"android"', "target_cpu": json.dumps(ABIS[abi][0]),
                 "is_debug": "false", "is_component_build": "false",
                 "rtc_include_opus": "true", "use_remoteexec": "false"}
-    if any(values.get(key) != value for key, value in expected.items()):
-        raise ValueError("Base toolchain arguments do not match the required Android/Opus ABI")
+    mismatches = [key for key, value in expected.items() if values.get(key) != value]
+    if values.get("use_siso") not in ("true", "false"):
+        mismatches.append("use_siso")
+    if mismatches:
+        raise ValueError("Required Android/Opus GN arguments differ or are missing: " + ", ".join(mismatches))
     return values
 
 

@@ -32,6 +32,41 @@ EOF
 gclient sync --nohooks --no-history --shallow --revision "src@$WEBRTC_REV"
 [[ $(git -C src rev-parse HEAD) == "$WEBRTC_REV" ]]
 cd src
+if [[ "$prepare_only" == true ]]; then
+  # The pinned root has exactly one unnamed hook: downloading test movies and
+  # recordings. Suppress only that root hook through gclient's supported
+  # custom_hooks contract; keep every named/root and dependency hook intact.
+  python3 - "$WEBRTC_REV" <<'PY'
+import ast, pathlib, subprocess, sys
+root = pathlib.Path.cwd()
+deps = (root/'DEPS').read_bytes()
+if deps != subprocess.check_output(['git', 'show', sys.argv[1]+':DEPS']):
+    raise SystemExit('Source preparation requires the exact pinned DEPS bytes')
+tree = ast.parse(deps.decode('utf-8'))
+assignments = [node for node in tree.body if isinstance(node, ast.Assign)
+    and any(isinstance(target, ast.Name) and target.id == 'hooks' for target in node.targets)]
+if len(assignments) != 1 or not isinstance(assignments[0].value, ast.List) or any(
+        isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == 'hooks' for node in tree.body):
+    raise SystemExit('Pinned root hook structure changed')
+unnamed = []
+for hook in assignments[0].value.elts:
+    if not isinstance(hook, ast.Dict): raise SystemExit('Invalid pinned root hook')
+    fields = {ast.literal_eval(key): value for key, value in zip(hook.keys, hook.values)}
+    name = ast.literal_eval(fields['name']) if 'name' in fields else ''
+    if name == '': unnamed.append(fields)
+expected = ['download_from_google_storage', '--directory', '--recursive', '--num_threads=10',
+    '--quiet', '--bucket', 'chromium-webrtc-resources', 'src/resources']
+if (len(unnamed) != 1 or set(unnamed[0]) != {'pattern', 'action'}
+        or ast.literal_eval(unnamed[0]['pattern']) != '.' or ast.literal_eval(unnamed[0]['action']) != expected):
+    raise SystemExit('Only the exact unnamed test-media hook may be omitted')
+config = root.parent/'.gclient'
+if config.is_symlink() or not config.is_file(): raise SystemExit('Exact fresh gclient configuration required')
+text = config.read_text(encoding='utf-8')
+if 'custom_hooks' in text: raise SystemExit('Unexpected preexisting hook override')
+config.write_text(text+"\nsolutions[0]['custom_hooks'] = [{'name': ''}]\n", encoding='utf-8')
+print('LUMA_ANDROID_SOURCE_PREPARATION_OMITS_ONLY_ROOT_TEST_MEDIA')
+PY
+fi
 # These are the official checked-out prerequisite installer and hooks, not a
 # separately downloaded NDK or an opaque third-party Maven AAR.
 if [[ -f build/install-build-deps.sh ]]; then
@@ -56,6 +91,7 @@ value = {'schemaVersion': 1, 'kind': 'official-webrtc-android-source-preparation
     'webrtcRevision': os.environ['WEBRTC_REV'], 'depotToolsRevision': os.environ['DEPOT_REV'],
     'abi': os.environ['LUMA_ABI'], 'officialSdkCompiled': False, 'addonCompiled': False,
     'nativeOrDeviceExecution': False,
+    'omittedRootTestMediaHook': {'name': '', 'resourcePath': 'src/resources', 'scope': 'root-solution-only'},
     'recipeSha256': hashlib.sha256(pathlib.Path(os.environ['LUMA_RECIPE']).read_bytes()).hexdigest().upper(),
     'files': files}
 (root/'source-preparation-receipt.json').write_text(json.dumps(value, indent=2)+'\n', encoding='utf-8')
