@@ -39,6 +39,8 @@ if [[ "$prepare_only" == true ]]; then
   python3 - "$WEBRTC_REV" <<'PY'
 import ast, pathlib, subprocess, sys
 root = pathlib.Path.cwd()
+sys.path.insert(0, str(root.parent/'depot_tools'))
+import gclient_eval
 deps = (root/'DEPS').read_bytes()
 if deps != subprocess.check_output(['git', 'show', sys.argv[1]+':DEPS']):
     raise SystemExit('Source preparation requires the exact pinned DEPS bytes')
@@ -63,7 +65,17 @@ config = root.parent/'.gclient'
 if config.is_symlink() or not config.is_file(): raise SystemExit('Exact fresh gclient configuration required')
 text = config.read_text(encoding='utf-8')
 if 'custom_hooks' in text: raise SystemExit('Unexpected preexisting hook override')
-config.write_text(text+"\nsolutions[0]['custom_hooks'] = [{'name': ''}]\n", encoding='utf-8')
+configuration = gclient_eval.ParseLocalConfig(text, '.gclient')
+expected_config = {'solutions': [{'name': 'src', 'url': 'https://webrtc.googlesource.com/src.git',
+    'managed': False, 'custom_deps': {}, 'custom_vars': {}}], 'target_os': ['android']}
+if configuration != expected_config: raise SystemExit('Exact fresh root solution configuration required')
+configuration['solutions'][0]['custom_hooks'] = [{'name': ''}]
+# gclient permits only declarative name assignments, not Python subscript
+# updates. Validate the exact text with its pinned parser before replacement.
+replacement = 'solutions = '+repr(configuration['solutions'])+'\ntarget_os = '+repr(configuration['target_os'])+'\n'
+if gclient_eval.ParseLocalConfig(replacement, '.gclient') != configuration:
+    raise SystemExit('Pinned gclient configuration readback changed')
+config.write_text(replacement, encoding='utf-8')
 print('LUMA_ANDROID_SOURCE_PREPARATION_OMITS_ONLY_ROOT_TEST_MEDIA')
 PY
 fi
