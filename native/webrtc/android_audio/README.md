@@ -55,6 +55,10 @@ new build output. The addon is compiled from source; its receipt records
 hashes. Source/tool preparation remains the caller's separately reviewed step.
 The five copied addon inputs and original recipe inputs are rehashed after
 compilation and license generation, before the output receipt is written.
+Every child build tool receives the verified depot directory first in its own
+PATH, including gclient's nested CIPD invocation when preparation ran in a
+previous shell step. This does not alter the caller's or machine's environment.
+Captured tool failures retain their bounded stdout/stderr in the build log.
 
 `test_gn_contract.py --source-root <existing-pinned-checkout> --output <fresh-fixture-dir>`
 exercises the exact pinned Android JNI template bodies using existing local GN.

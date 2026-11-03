@@ -46,9 +46,24 @@ def stream_digest(stream):
     return value.hexdigest()
 
 
-def run(command, cwd, capture=False):
-    return subprocess.run([str(value) for value in command], cwd=cwd, check=True,
-                          text=True, encoding="utf-8", capture_output=capture).stdout
+def run(command, cwd, capture=False, depot=None):
+    # Preparation and addon compilation can be separate shell steps. Preserve
+    # the pinned depot child-tool lookup (gclient invokes cipd) without changing
+    # this process's or the machine's PATH.
+    environment = None
+    if depot is not None:
+        environment = os.environ.copy()
+        environment["PATH"] = str(depot) + os.pathsep + environment.get("PATH", "")
+    try:
+        return subprocess.run([str(value) for value in command], cwd=cwd, check=True,
+                              text=True, encoding="utf-8", capture_output=capture,
+                              env=environment).stdout
+    except subprocess.CalledProcessError as error:
+        if capture:
+            for output in (error.stdout, error.stderr):
+                if output:
+                    print(output[-65536:], file=sys.stderr, flush=True)
+        raise
 
 
 def regular_file(path, maximum=268435456):
@@ -164,10 +179,10 @@ def require_clean_checkouts(source, depot, revisions):
     if not any(path == Path(source).resolve(strict=True) and revision == WEBRTC_REV for path, revision in repositories):
         raise ValueError("Actual revisions omit the pinned source root")
     for repository, revision in repositories:
-        top = Path(run(["git", "rev-parse", "--show-toplevel"], repository, True).strip()).resolve(strict=True)
-        if (top != repository or run(["git", "rev-parse", "HEAD"], repository, True).strip().lower() != revision.lower()):
+        top = Path(run(["git", "rev-parse", "--show-toplevel"], repository, True, depot).strip()).resolve(strict=True)
+        if (top != repository or run(["git", "rev-parse", "HEAD"], repository, True, depot).strip().lower() != revision.lower()):
             raise ValueError("Dependency checkout is not its exact pinned repository")
-        run(["git", "-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--exit-code", "--quiet", "HEAD", "--"], repository)
+        run(["git", "-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--exit-code", "--quiet", "HEAD", "--"], repository, depot=depot)
 
 
 def verify_copied_sources(source, recipe, hashes):
@@ -267,7 +282,7 @@ def source_copy(source, recipe):
     return hashes
 
 
-def generate_licenses(source, build, output, gn):
+def generate_licenses(source, build, output, gn, depot):
     # Keep the official pinned collector and all of its missing-license checks.
     # Only its GN invocation gains the supported root-target switch. The pinned
     # source file itself is never edited.
@@ -278,7 +293,7 @@ def generate_licenses(source, build, output, gn):
 
     def rooted_gn(buildfile_dir, target):
         return run([gn, "desc", "--all", "--format=json", buildfile_dir, target,
-                    "--root-target=" + ROOT_TARGET], source, capture=True)
+                    "--root-target=" + ROOT_TARGET], source, capture=True, depot=depot)
 
     module.LicenseBuilder._run_gn = staticmethod(rooted_gn)
     notices = output / "licenses"
@@ -341,7 +356,7 @@ def build(options):
     reused_evidence = None
     actual_revisions = None
     if reused:
-        actual_revisions = run([sys.executable, regular_file(depot / "gclient.py"), "revinfo", "--actual"], source, True)
+        actual_revisions = run([sys.executable, regular_file(depot / "gclient.py"), "revinfo", "--actual"], source, True, depot)
         require_clean_checkouts(source, depot, actual_revisions)
         reused_evidence = verify_reused_base(options.base_receipt, options.expected_base_receipt_sha256,
                                            base_aar, options.abi, regular_file(source / "DEPS").read_bytes(), actual_revisions)
@@ -354,24 +369,24 @@ def build(options):
     if base_library_hash(base_aar, options.abi) != library_before:
         raise ValueError("Base AAR differs from this prepared build directory")
     source_hashes = source_copy(source, Path(__file__).resolve().parent)
-    run([gn, "gen", build_dir, "--root-target=" + ROOT_TARGET, "--fail-on-unused-args"], source)
+    run([gn, "gen", build_dir, "--root-target=" + ROOT_TARGET, "--fail-on-unused-args"], source, depot=depot)
     records = json.loads(run([gn, "args", build_dir, "--list", "--json",
-                              "--root-target=" + ROOT_TARGET], source, True))
+                              "--root-target=" + ROOT_TARGET], source, True, depot))
     values = validate_args(records, options.abi)
     if digest(args_file) != before_args:
         raise ValueError("Addon generation changed the base compiler/toolchain arguments")
-    run([gn, "check", build_dir, ADDON_TARGET, "--root-target=" + ROOT_TARGET], source)
+    run([gn, "check", build_dir, ADDON_TARGET, "--root-target=" + ROOT_TARGET], source, depot=depot)
     if values.get("use_siso") == "true":
         runner = regular_file(source / "third_party/siso/cipd" / ("siso.exe" if sys.platform == "win32" else "siso"))
         command = [runner, "ninja", "-C", build_dir, "-j=" + str(options.jobs), "luma_audio_factory:luma_webrtc_audio"]
     else:
         runner = regular_file(source / "third_party/ninja" / ("ninja.exe" if sys.platform == "win32" else "ninja"))
         command = [runner, "-C", build_dir, "-j", str(options.jobs), "luma_audio_factory:luma_webrtc_audio"]
-    run(command, source)
+    run(command, source, depot=depot)
     binary = regular_file(build_dir / LIBRARY)
     machine = elf_machine(binary, options.abi)
     readelf = find_readelf(source)
-    symbols = run([readelf, "--dyn-syms", "--wide", binary], source, True)
+    symbols = run([readelf, "--dyn-syms", "--wide", binary], source, True, depot)
     validate_exports(symbols)
     if (digest(args_file) != before_args or digest(base_aar) != base_sha
             or not reused and digest(build_dir / BASE_LIBRARY) != library_before):
@@ -379,10 +394,10 @@ def build(options):
     output.mkdir(parents=True)
     shutil.copyfile(binary, output / LIBRARY)
     shutil.copyfile(args_file, output / "build-args.gn")
-    licenses = generate_licenses(source, build_dir, output, gn)
+    licenses = generate_licenses(source, build_dir, output, gn, depot)
     verify_copied_sources(source, Path(__file__).resolve().parent, source_hashes)
     if reused:
-        after_revisions = run([sys.executable, regular_file(depot / "gclient.py"), "revinfo", "--actual"], source, True)
+        after_revisions = run([sys.executable, regular_file(depot / "gclient.py"), "revinfo", "--actual"], source, True, depot)
         require_clean_checkouts(source, depot, after_revisions)
         after = verify_reused_base(options.base_receipt, options.expected_base_receipt_sha256,
                                    base_aar, options.abi, regular_file(source / "DEPS").read_bytes(), after_revisions)
