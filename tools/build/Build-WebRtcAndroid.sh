@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Build the official AAR on an isolated Linux build worker, never on a user device.
+# Prepare pinned source/tools, optionally build the official AAR on an isolated
+# Linux build worker. This script is never run on a user device.
 set -euo pipefail
 readonly WEBRTC_REV=19581c3352d3e77b3e9731318279772a05540bbe
 readonly DEPOT_REV=914c72296c0a3941d733e01e72ab3911729c2dd8
-[[ $# == 3 && $(uname -s) == Linux ]] || { echo 'Usage: Build-WebRtcAndroid.sh WORK OUTPUT arm64-v8a|x86_64 (Linux only)' >&2; exit 2; }
+prepare_only=false
+if [[ $# == 4 && $1 == --prepare-source-only ]]; then prepare_only=true; shift; fi
+[[ $# == 3 && $(uname -s) == Linux ]] || { echo 'Usage: Build-WebRtcAndroid.sh [--prepare-source-only] WORK OUTPUT arm64-v8a|x86_64 (Linux only)' >&2; exit 2; }
+script_path=$(realpath -- "${BASH_SOURCE[0]}")
+readonly script_path
 work=$(realpath -m -- "$1")
 output=$(realpath -m -- "$2")
 abi=$3
@@ -37,6 +42,27 @@ else
   echo 'Pinned Chromium build prerequisites are missing.' >&2; exit 3
 fi
 gclient runhooks
+if [[ "$prepare_only" == true ]]; then
+  [[ $(git rev-parse HEAD) == "$WEBRTC_REV" ]]
+  git diff --no-ext-diff --exit-code --quiet HEAD --
+  gclient revinfo --actual > "$output/source-revisions.txt"
+  cp -- DEPS "$output/DEPS"
+  /usr/bin/env WEBRTC_REV="$WEBRTC_REV" DEPOT_REV="$DEPOT_REV" LUMA_ABI="$abi" LUMA_OUTPUT="$output" LUMA_RECIPE="$script_path" python3 - <<'PY'
+import hashlib, json, os, pathlib
+root = pathlib.Path(os.environ['LUMA_OUTPUT'])
+files = {name: hashlib.sha256((root/name).read_bytes()).hexdigest().upper()
+         for name in ('DEPS', 'source-revisions.txt')}
+value = {'schemaVersion': 1, 'kind': 'official-webrtc-android-source-preparation',
+    'webrtcRevision': os.environ['WEBRTC_REV'], 'depotToolsRevision': os.environ['DEPOT_REV'],
+    'abi': os.environ['LUMA_ABI'], 'officialSdkCompiled': False, 'addonCompiled': False,
+    'nativeOrDeviceExecution': False,
+    'recipeSha256': hashlib.sha256(pathlib.Path(os.environ['LUMA_RECIPE']).read_bytes()).hexdigest().upper(),
+    'files': files}
+(root/'source-preparation-receipt.json').write_text(json.dumps(value, indent=2)+'\n', encoding='utf-8')
+print('LUMA_ANDROID_SOURCE_PREPARATION_PASS; official SDK compile skipped')
+PY
+  exit 0
+fi
 aar="$output/libwebrtc-$WEBRTC_REV-$abi.aar"
 vpython3 tools_webrtc/android/build_aar.py --arch "$abi" --output "$aar" \
   --build-dir "$work/src/out/luma-aar" \

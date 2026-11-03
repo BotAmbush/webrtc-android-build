@@ -20,6 +20,9 @@ rtc_library("stereo_opus_factory") {
 if (is_android) {
   rtc_shared_library("luma_webrtc_audio") {
     sources = [ "jni_audio_factory.cc" ]
+    # The Android rtc_shared_library wrapper always runs generate_final_jni.
+    # Our two ordinary exported JNI methods have no generated Java targets.
+    java_targets = []
     allow_poison = [ "audio_codecs" ]
     # The Java adapter uses ordinary exported JNI names, not JNI_OnLoad-only
     # registration. Match the official SDK shared library's export policy.

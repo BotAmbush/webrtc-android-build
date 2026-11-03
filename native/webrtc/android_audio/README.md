@@ -37,6 +37,31 @@ loads a native library or modifies the original AAR. Example invocation:
 python3 build_addon.py --source-root <checkout/src> --depot-tools <checkout/depot_tools> --build-dir <existing-android-build/arm64-v8a> --base-aar <official-base.aar> --abi arm64-v8a --output <fresh-addon-output> --jobs 4
 ```
 
+If an official base build was already preserved, its verified artifact can be
+reused without claiming that the SDK was rebuilt in the new checkout:
+
+```
+python3 build_addon.py --source-root <fresh-pinned-checkout/src> --depot-tools <checkout/depot_tools> --build-dir <checkout/src/out/fresh-audio-arm64> --base-aar <base-output/official-base.aar> --abi arm64-v8a --output <fresh-addon-output> --jobs 2 --reused-base --base-receipt <base-output/build-receipt.json> --expected-base-receipt-sha256 <explicit-receipt-pin>
+```
+
+This mode requires the complete immutable official output, including the AAR,
+receipt, exact `build-args.gn`, `DEPS`, source revisions and license files. It
+checks the receipt pin and every asset, compares the fresh checkout's actual
+dependency revisions/DEPS, refuses staged or unstaged tracked changes in the
+source/depot/dependency Git repositories, and copies only the verified GN arguments into a
+fresh addon output directory. It never plants a preserved SDK library into the
+new build output. The addon is compiled from source; its receipt records
+`buildMode: verified-base-artifact` and the original receipt/native/revision
+hashes. Source/tool preparation remains the caller's separately reviewed step.
+The five copied addon inputs and original recipe inputs are rehashed after
+compilation and license generation, before the output receipt is written.
+
+`test_gn_contract.py --source-root <existing-pinned-checkout> --output <fresh-fixture-dir>`
+exercises the exact pinned Android JNI template bodies using existing local GN.
+It verifies missing-`java_targets` refusal and the explicit empty-list fix with
+JNI multiplexing enabled and disabled. Its minimal fixture does not generate a
+full Android toolchain, compile code or execute Ninja.
+
 The output contains the standalone addon, byte-identical `build-args.gn`,
 `addon-build-receipt.json` and official combined-target license notices. A
 separate package composer must keep the original base AAR/receipt unchanged and

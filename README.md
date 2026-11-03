@@ -10,10 +10,15 @@ application, Windows host, display driver, input handling, signing keys, pairing
 data and installers are not included. No access to a private application
 repository or account secret is required.
 
-Run **Build pinned WebRTC Android AAR** manually under Actions and select the
-receiver ABI. The standard `ubuntu-24.04` GitHub-hosted runner supplies the Linux
+Run **Build stereo addon against verified official WebRTC AAR** manually under
+Actions. The current retry uses the preserved arm64-v8a official base from
+release `webrtc-19581c3352d3-arm64-v8a-41696830014-1`, whose archive and original
+receipt are independently pinned in the workflow. It prepares the same source
+and toolchain, builds only the addon in a fresh output directory, and verifies
+the complete base again before composition. It does not relabel the reused
+base as a newly compiled SDK. The standard `ubuntu-24.04` GitHub-hosted runner supplies the Linux
 build environment; users do not need Linux or WSL on their Windows computer.
-No large or paid runner is selected. The job has a 90-minute limit. Dependency
+No large or paid runner is selected. The job has a 50-minute limit. Dependency
 outputs are published as public prerelease assets, with no Actions cache or
 Actions artifact storage. GitHub's current standard public-repository runner
 billing policy applies.

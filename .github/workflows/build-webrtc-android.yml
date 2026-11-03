@@ -1,14 +1,14 @@
-name: Build pinned WebRTC Android AAR
+name: Build stereo addon against verified official WebRTC AAR
 
 on:
   workflow_dispatch:
     inputs:
       abi:
-        description: Receiver ABI (arm64 first; x86_64 is for emulator qualification)
+        description: Preserved official base ABI (arm64-v8a)
         required: true
         default: arm64-v8a
         type: choice
-        options: [arm64-v8a, x86_64]
+        options: [arm64-v8a]
 
 permissions:
   # Public dependency release assets avoid metered Actions artifact storage.
@@ -20,13 +20,18 @@ concurrency:
 
 jobs:
   aar:
+    if: ${{ github.repository == 'BotAmbush/webrtc-android-build' && github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 50
     env:
       DEPOT_TOOLS_UPDATE: '0'
       DEPOT_TOOLS_METRICS: '0'
       GCLIENT_PY3: '1'
       LUMA_WEBRTC_ABI: ${{ inputs.abi }}
+      LUMA_BASE_TAG: webrtc-19581c3352d3-arm64-v8a-41696830014-1
+      LUMA_BASE_ASSET: webrtc-19581c3352d3-arm64-v8a-41696830014-1.tar.gz
+      LUMA_BASE_ASSET_SHA256: 7DC8554FE8C72D995024F8D4F6CCC406B2E1D554ACBF7F122153B795729B9B67
+      LUMA_BASE_RECEIPT_SHA256: 7BB7787502F36D29B10DF09E9C87866693668463F4814B4FB825C2C133B33E4B
     steps:
       - name: Read reviewed build scripts
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -49,21 +54,82 @@ jobs:
           free_kib=$(df --output=avail -k "$RUNNER_TEMP" | tail -1 | tr -d ' ')
           df -h "$RUNNER_TEMP"
           [[ "$free_kib" =~ ^[0-9]+$ && "$free_kib" -ge 36700160 ]] || { echo "WebRTC needs at least 35 GiB free; available KiB: $free_kib"; exit 1; }
-      - name: Compile official source and collect license closure
-        timeout-minutes: 70
+      - name: Fetch and verify the preserved official base release
+        timeout-minutes: 5
         shell: bash
-        run: bash tools/build/Build-WebRtcAndroid.sh "$RUNNER_TEMP/luma-webrtc" "$GITHUB_WORKSPACE/artifacts/webrtc-android/base" "$LUMA_WEBRTC_ABI"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          [[ "$GITHUB_REPOSITORY" == BotAmbush/webrtc-android-build && "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          [[ "$LUMA_WEBRTC_ABI" == arm64-v8a ]]
+          mkdir -p "$RUNNER_TEMP/luma-base-download"
+          gh release download "$LUMA_BASE_TAG" --repo "$GH_REPO" --pattern "$LUMA_BASE_ASSET" --dir "$RUNNER_TEMP/luma-base-download"
+          python3 - <<'PY'
+          import hashlib, importlib.util, os, pathlib, shutil, tarfile
+          archive = pathlib.Path(os.environ['RUNNER_TEMP'])/'luma-base-download'/os.environ['LUMA_BASE_ASSET']
+          if archive.is_symlink() or not archive.is_file() or not 0 < archive.stat().st_size <= 268435456:
+              raise SystemExit('Invalid preserved base archive')
+          with archive.open('rb') as stream:
+              if hashlib.file_digest(stream, 'sha256').hexdigest().upper() != os.environ['LUMA_BASE_ASSET_SHA256']:
+                  raise SystemExit('Preserved base archive pin mismatch')
+          destination = pathlib.Path(os.environ['GITHUB_WORKSPACE'])/'artifacts/webrtc-android'
+          if destination.exists() or destination.is_symlink():
+              raise SystemExit('Fresh dependency output required')
+          with tarfile.open(archive, 'r:gz') as source:
+              entries = source.getmembers()
+              if len(entries) > 256:
+                  raise SystemExit('Excessive base archive entries')
+              validated = []; names = set(); total = 0
+              for entry in entries:
+                  name = entry.name
+                  while name.startswith('./'): name = name[2:]
+                  if name in ('', '.') and entry.isdir(): continue
+                  relative = pathlib.PurePosixPath(name)
+                  if ('\\' in name or ':' in name or relative.is_absolute() or relative.as_posix() != name
+                          or any(part in ('', '.', '..') for part in relative.parts)
+                          or not relative.parts or relative.parts[0] != 'base'
+                          or name in names or entry.issparse() or not (entry.isdir() or entry.isfile())
+                          or len(relative.parts) == 1 and not entry.isdir()
+                          or entry.size < 0 or entry.size > 268435456):
+                      raise SystemExit('Unsafe preserved base archive member')
+                  names.add(name); total += entry.size
+                  if total > 536870912: raise SystemExit('Base archive exceeds its expansion bound')
+                  validated.append((entry, relative))
+              destination.mkdir(parents=True)
+              for entry, relative in validated:
+                  target = destination.joinpath(*relative.parts)
+                  if entry.isdir(): target.mkdir(parents=True, exist_ok=True); continue
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with source.extractfile(entry) as incoming, target.open('xb') as outgoing:
+                      shutil.copyfileobj(incoming, outgoing, 1048576)
+          recipe = pathlib.Path(os.environ['GITHUB_WORKSPACE'])/'native/webrtc/android_audio/build_addon.py'
+          spec = importlib.util.spec_from_file_location('luma_addon_recipe', recipe)
+          addon = importlib.util.module_from_spec(spec); spec.loader.exec_module(addon)
+          base = destination/'base'
+          aar = base/('libwebrtc-'+addon.WEBRTC_REV+'-'+os.environ['LUMA_WEBRTC_ABI']+'.aar')
+          addon.verify_reused_base(base/'build-receipt.json', os.environ['LUMA_BASE_RECEIPT_SHA256'],
+              aar, os.environ['LUMA_WEBRTC_ABI'], (base/'DEPS').read_bytes(), (base/'source-revisions.txt').read_text())
+          print('PRESERVED_BASE_ARTIFACT_VERIFIED; fresh source/toolchain checks run separately before addon compile')
+          PY
+      - name: Prepare exact source and toolchain without rebuilding the official SDK
+        timeout-minutes: 20
+        shell: bash
+        run: bash tools/build/Build-WebRtcAndroid.sh --prepare-source-only "$RUNNER_TEMP/luma-webrtc" "$GITHUB_WORKSPACE/artifacts/webrtc-android/preparation" "$LUMA_WEBRTC_ABI"
       - name: Build stereo decoder factory with the unchanged pinned toolchain
-        timeout-minutes: 12
+        timeout-minutes: 15
         shell: bash
         run: |
           python3 native/webrtc/android_audio/build_addon.py \
             --source-root "$RUNNER_TEMP/luma-webrtc/src" \
             --depot-tools "$RUNNER_TEMP/luma-webrtc/depot_tools" \
-            --build-dir "$RUNNER_TEMP/luma-webrtc/src/out/luma-aar/$LUMA_WEBRTC_ABI" \
+            --build-dir "$RUNNER_TEMP/luma-webrtc/src/out/luma-audio-reuse-$LUMA_WEBRTC_ABI" \
             --base-aar "$GITHUB_WORKSPACE/artifacts/webrtc-android/base/libwebrtc-19581c3352d3e77b3e9731318279772a05540bbe-$LUMA_WEBRTC_ABI.aar" \
             --abi "$LUMA_WEBRTC_ABI" \
-            --output "$GITHUB_WORKSPACE/artifacts/webrtc-android/addon" --jobs 2
+            --output "$GITHUB_WORKSPACE/artifacts/webrtc-android/addon" --jobs 2 \
+            --reused-base \
+            --base-receipt "$GITHUB_WORKSPACE/artifacts/webrtc-android/base/build-receipt.json" \
+            --expected-base-receipt-sha256 "$LUMA_BASE_RECEIPT_SHA256"
       - name: Verify and compose the dependency with both native libraries
         id: compose
         timeout-minutes: 3
@@ -92,7 +158,7 @@ jobs:
           archive="$RUNNER_TEMP/$tag.tar.gz"
           notes="$RUNNER_TEMP/dependency-release-notes.txt"
           tar -czf "$archive" -C "$output" .
-          printf 'Dependency-only build. Composition outcome: %s.\nPartial outputs without a complete verified receipt are unqualified. Compilation does not qualify hardware or media playback.\n' "$COMPOSITION_OUTCOME" > "$notes"
+          printf 'Dependency-only addon build against a preserved, pinned official base. Composition outcome: %s.\nPartial outputs without a complete verified receipt are unqualified. Compilation does not qualify hardware or media playback.\n' "$COMPOSITION_OUTCOME" > "$notes"
           gh release create "$tag" "$archive" --target "$GITHUB_SHA" \
             --title "WebRTC Android dependency $LUMA_WEBRTC_ABI ($GITHUB_RUN_ID)" \
             --notes-file "$notes" --prerelease
